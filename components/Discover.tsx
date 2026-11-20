@@ -25,7 +25,14 @@ export default function Discover() {
   const [matchCount, setMatchCount] = useState(() => feedStore.getMatchCount() ?? 0);
   const [toast, setToast] = useState<Toast | null>(null);
   const router = useRouter();
-  const topCard = useRef<SwipeCardHandle>(null);
+  // Handles keyed by card element key. A single shared ref broke when the exiting
+  // card unmounted and nulled it out from under the new top card.
+  const handles = useRef(new Map<string, SwipeCardHandle>());
+  const topKey = useRef<string | null>(null);
+  const top = useCallback(() => (topKey.current ? (handles.current.get(topKey.current) ?? null) : null), []);
+  // Bumped when a failed swipe puts a card back, so it remounts fresh instead of
+  // reviving the half-exited instance (which is stuck off-screen in "leaving" state).
+  const [retry, setRetry] = useState<Record<string, number>>({});
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const showToast = useCallback((kind: Toast["kind"], text: string) => {
@@ -86,9 +93,8 @@ export default function Discover() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ profileId: profile.id, action }),
         });
-        if (res.status === 409) return feedStore.settle(profile.id); // already recorded server-side
+        if (res.status === 409) return; // already recorded server-side
         if (!res.ok) throw new Error(`swipe failed: ${res.status}`);
-        feedStore.settle(profile.id);
         const data = (await res.json()) as SwipeResponse;
         if (data.matched && data.match) {
           haptics.match();
@@ -98,6 +104,7 @@ export default function Discover() {
       } catch {
         // Put the card back so the swipe can be retried.
         feedStore.restore(profile.id);
+        setRetry((r) => ({ ...r, [profile.id]: (r[profile.id] ?? 0) + 1 }));
         setProfiles((prev) => (prev ? [profile, ...prev.filter((p) => p.id !== profile.id)] : prev));
         showToast("error", "Couldn't save that swipe. Try again.");
       }
@@ -106,8 +113,17 @@ export default function Discover() {
   );
 
   const reset = async () => {
-    await fetch("/api/reset", { method: "POST" });
+    try {
+      const res = await fetch("/api/reset", { method: "POST" });
+      if (!res.ok) throw new Error(String(res.status));
+    } catch {
+      showToast("error", "Couldn't reset. Try again.");
+      return;
+    }
+    feedStore.clear();
+    setRetry({});
     setProfiles(null);
+    setMatchCount(0);
     await load();
   };
 
@@ -118,53 +134,50 @@ export default function Discover() {
   const hintStarted = useRef(false);
   const hintTeardown = useRef<() => void>(() => {});
   useEffect(() => {
-    if (hintStarted.current || !profiles?.length || match) return;
-    if (hintShownThisLoad) return;
+    if (hintStarted.current || hintShownThisLoad || !profiles?.length || match) return;
     hintStarted.current = true;
 
-    const markSeen = () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = () => {
       hintShownThisLoad = true;
-    };
-    const stop = () => {
-      topCard.current?.cancelDemo();
+      clearTimeout(timer);
       setShowHint(false);
-      markSeen();
-      cleanup();
-    };
-    const cleanup = () => {
       window.removeEventListener("pointerdown", stop);
       window.removeEventListener("keydown", stop);
     };
-    hintTeardown.current = () => {
-      clearTimeout(timer);
-      cleanup();
+    // Any interaction, even before the demo starts, skips it.
+    const stop = () => {
+      top()?.cancelDemo();
+      finish();
     };
-    const timer = setTimeout(() => {
-      window.addEventListener("pointerdown", stop);
-      window.addEventListener("keydown", stop);
+    window.addEventListener("pointerdown", stop);
+    window.addEventListener("keydown", stop);
+    hintTeardown.current = finish;
+
+    timer = setTimeout(() => {
+      const card = top();
+      if (!card) return finish();
       setShowHint(true);
-      topCard.current?.demo().then(() => {
-        setShowHint(false);
-        markSeen();
-        cleanup();
-      });
+      card.demo().then(finish);
     }, 700);
     // No cleanup here: a background feed refresh must not cancel the scheduled demo.
-  }, [profiles, match]);
+  }, [profiles, match, top]);
   useEffect(() => () => hintTeardown.current(), []); // only on leaving the page
 
   // Keyboard support on desktop: ← pass, → like.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!canSwipe) return;
-      if (e.key === "ArrowRight") topCard.current?.swipe(1);
-      if (e.key === "ArrowLeft") topCard.current?.swipe(-1);
+      if (e.key === "ArrowRight") top()?.swipe(1);
+      if (e.key === "ArrowLeft") top()?.swipe(-1);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [canSwipe]);
+  }, [canSwipe, top]);
 
   const visible = profiles?.slice(0, 2) ?? [];
+  const cardKey = (p: Profile) => `${p.id}:${retry[p.id] ?? 0}`;
+  topKey.current = visible[0] ? cardKey(visible[0]) : null;
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
@@ -209,13 +222,13 @@ export default function Discover() {
       <div className="relative mx-5 min-h-0 flex-1">
         {profiles === null && !loadError && <CardSkeleton />}
 
-        {loadError && (
+        {loadError && !profiles?.length && (
           <EmptyState title="Something went sideways" body="We couldn't load profiles. Give it another go.">
             <PrimaryButton onClick={load}>Retry</PrimaryButton>
           </EmptyState>
         )}
 
-        {profiles?.length === 0 && (
+        {profiles?.length === 0 && !loadError && (
           <EmptyState title="You're all caught up" body="You've seen everyone for now. New people show up here as they join.">
             <PrimaryButton href="/discover/matches">See your matches</PrimaryButton>
             <button onClick={reset} className="text-sm font-bold text-ink/45 underline underline-offset-4 hover:text-ink">
@@ -225,16 +238,22 @@ export default function Discover() {
         )}
 
         <AnimatePresence custom={exitDir}>
-          {visible.map((p, i) => (
+          {visible.map((p, i) => {
+            const key = cardKey(p);
+            return (
             <SwipeCard
-              key={p.id}
-              ref={i === 0 ? topCard : undefined}
+              key={key}
+              ref={(h) => {
+                if (h) handles.current.set(key, h);
+                else handles.current.delete(key);
+              }}
               profile={p}
               isTop={i === 0}
               onSwipe={(dir) => handleSwipe(p, dir)}
               onOpen={() => router.push(`/discover/${p.id}`)}
             />
-          ))}
+            );
+          })}
         </AnimatePresence>
 
         {/* First-run swipe hint */}
@@ -257,10 +276,10 @@ export default function Discover() {
       </div>
 
       <div className="flex shrink-0 items-center justify-center gap-6 py-4">
-        <ActionButton label="Pass" disabled={!canSwipe} onClick={() => topCard.current?.swipe(-1)} tone="pass">
+        <ActionButton label="Pass" disabled={!canSwipe} onClick={() => top()?.swipe(-1)} tone="pass">
           <XIcon className="h-6 w-6" />
         </ActionButton>
-        <ActionButton label="Like" disabled={!canSwipe} onClick={() => topCard.current?.swipe(1)} tone="like">
+        <ActionButton label="Like" disabled={!canSwipe} onClick={() => top()?.swipe(1)} tone="like">
           <HeartIcon className="h-7 w-7" />
         </ActionButton>
       </div>

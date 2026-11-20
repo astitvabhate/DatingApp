@@ -4,14 +4,16 @@ import type { Profile } from "./types";
 
 // Tiny in-memory client cache for the Discover deck, so navigating
 // /discover -> /discover/[id] -> /discover is instant (no skeleton/refetch wait).
-// `pending` holds ids whose swipe POST is still in flight: they're filtered out
-// of any feed response so a swiped profile can never flash back in.
+//
+// `swiped` remembers every profile swiped during this page load. Feed responses
+// are always filtered through it, so a response that was requested *before* a
+// swipe (but arrives after) can never bring a swiped profile back.
 
 let feed: Profile[] | null = null;
 let matchCount: number | null = null;
-const pending = new Set<string>();
+const swiped = new Set<string>();
 
-const visible = (list: Profile[]) => list.filter((p) => !pending.has(p.id));
+const visible = (list: Profile[]) => list.filter((p) => !swiped.has(p.id));
 
 export const feedStore = {
   getFeed: () => (feed ? visible(feed) : null),
@@ -22,16 +24,19 @@ export const feedStore = {
   setMatchCount: (n: number) => {
     matchCount = n;
   },
-  /** Drop a profile from the cached deck and hide it until its swipe is saved. */
+  /** Drop a profile from the cached deck and keep it out of every later feed response. */
   markSwiped: (id: string) => {
-    pending.add(id);
+    swiped.add(id);
     if (feed) feed = feed.filter((p) => p.id !== id);
   },
-  settle: (id: string) => {
-    pending.delete(id);
-  },
-  /** Swipe failed: allow the profile back into future feed responses. */
+  /** Swipe failed to save: allow the profile back into the deck. */
   restore: (id: string) => {
-    pending.delete(id);
+    swiped.delete(id);
+  },
+  /** Demo reset: forget everything. */
+  clear: () => {
+    swiped.clear();
+    feed = null;
+    matchCount = null;
   },
 };

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { CURRENT_USER, type Match } from "@/lib/types";
 import { HeartIcon } from "./icons";
@@ -8,6 +9,16 @@ import { HeartIcon } from "./icons";
 type Props = { match: Match | null; onClose: () => void };
 
 export default function MatchModal({ match, onClose }: Props) {
+  // Escape closes the dialog.
+  useEffect(() => {
+    if (!match) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [match, onClose]);
+
   return (
     <AnimatePresence>
       {match && (

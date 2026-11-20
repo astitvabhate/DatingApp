@@ -40,6 +40,13 @@ function redisFromEnv(): Redis | null {
 const SWIPES_KEY = "coy:swipes"; // hash: profileId -> SwipeRecord
 const MATCHES_KEY = "coy:matches"; // hash: profileId -> matchedAt
 
+// KEYS[1]=swipes, KEYS[2]=matches; ARGV[1]=profileId, ARGV[2]=swipe JSON, ARGV[3]=matchedAt or ""
+const ADD_SWIPE_SCRIPT = `
+if redis.call('HSETNX', KEYS[1], ARGV[1], ARGV[2]) == 0 then return 0 end
+if ARGV[3] ~= '' then redis.call('HSET', KEYS[2], ARGV[1], ARGV[3]) end
+return 1
+`;
+
 function redisStore(redis: Redis): Store {
   return {
     async read() {
@@ -53,11 +60,15 @@ function redisStore(redis: Redis): Store {
       };
     },
     async addSwipe(profileId, record, match) {
-      // HSETNX is atomic: a second swipe on the same profile is rejected even across instances.
-      const created = await redis.hsetnx(SWIPES_KEY, profileId, record);
-      if (!created) return false;
-      if (match) await redis.hset(MATCHES_KEY, { [match.profileId]: match.matchedAt });
-      return true;
+      // One Lua script = one atomic step: the swipe and its match are written
+      // together or not at all, and a second swipe on the same profile is
+      // rejected (HSETNX) even across serverless instances.
+      const created = await redis.eval(
+        ADD_SWIPE_SCRIPT,
+        [SWIPES_KEY, MATCHES_KEY],
+        [profileId, JSON.stringify(record), match?.matchedAt ?? ""]
+      );
+      return Number(created) === 1;
     },
     async reset() {
       await redis.del(SWIPES_KEY, MATCHES_KEY);

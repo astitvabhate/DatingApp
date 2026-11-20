@@ -57,6 +57,7 @@ const SwipeCard = forwardRef<SwipeCardHandle, Props>(function SwipeCard({ profil
 
   // Button / keyboard swipe: nudge the card so the LIKE/NOPE sticker shows, then fling it.
   const demoCancelled = useRef(false);
+  const flinging = useRef(false); // a button/key swipe is animating out
   const stopDemo = () => {
     demoCancelled.current = true;
     x.stop();
@@ -64,7 +65,8 @@ const SwipeCard = forwardRef<SwipeCardHandle, Props>(function SwipeCard({ profil
 
   useImperativeHandle(ref, () => ({
     swipe: (dir) => {
-      if (leaving.current) return;
+      if (leaving.current || flinging.current) return;
+      flinging.current = true;
       stopDemo();
       animate(x, dir * (DISTANCE_THRESHOLD + 30), { duration: 0.18, ease: "easeOut" }).then(() => commit(dir));
     },
