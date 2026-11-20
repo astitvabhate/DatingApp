@@ -1,4 +1,6 @@
-// Home tab — intentionally blank placeholder for Phase 1.
+import { redirect } from "next/navigation";
+
+// Home is a placeholder for now; the app opens straight into Discover.
 export default function HomePage() {
-  return <div className="flex-1" />;
+  redirect("/discover");
 }

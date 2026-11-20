@@ -9,6 +9,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@upstash/redis": "^1.41.0",
     "framer-motion": "^12.43.0",
     "next": "^15.5.29",
     "react": "^19.3.1",

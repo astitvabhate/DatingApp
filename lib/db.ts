@@ -1,62 +1,148 @@
 import "server-only";
 import { promises as fs } from "fs";
+import os from "os";
 import path from "path";
+import { Redis } from "@upstash/redis";
 import { INBOUND_LIKES, PROFILES } from "./seed";
 import type { Match, Profile, SwipeAction } from "./types";
 
-// A tiny JSON-file "database". Persists swipes and matches across reloads
-// and server restarts. Delete data/db.json (or call POST /api/reset) to start over.
+// Persistence for swipes and matches, with two interchangeable backends:
+//
+// - Redis (Upstash): used whenever its REST credentials are set. Required for
+//   real persistence on serverless hosts like Vercel, whose filesystem is
+//   read-only and not shared between instances.
+// - JSON file: local development (data/db.json). On Vercel without Redis it
+//   falls back to /tmp so swipes don't error, but that data is per-instance
+//   and temporary.
+//
+// Profiles themselves are static seed data (lib/seed.ts).
 
 type SwipeRecord = { action: SwipeAction; at: string };
 type MatchRecord = { profileId: string; matchedAt: string };
-type DbShape = {
-  swipes: Record<string, SwipeRecord>; // keyed by profileId
-  matches: MatchRecord[];
-};
+type Snapshot = { swipes: Record<string, SwipeRecord>; matches: MatchRecord[] };
 
-const DB_PATH = path.join(process.cwd(), "data", "db.json");
-const emptyDb = (): DbShape => ({ swipes: {}, matches: [] });
+interface Store {
+  read(): Promise<Snapshot>;
+  /** Atomically record a swipe. Returns false if this profile was already swiped. */
+  addSwipe(profileId: string, record: SwipeRecord, match: MatchRecord | null): Promise<boolean>;
+  reset(): Promise<void>;
+}
+
+// ---------------------------------------------------------------- Redis store
+
+function redisFromEnv(): Redis | null {
+  // Vercel's Upstash integration sets KV_REST_API_*; a direct Upstash setup uses UPSTASH_REDIS_REST_*.
+  const url = process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.KV_REST_API_TOKEN ?? process.env.UPSTASH_REDIS_REST_TOKEN;
+  return url && token ? new Redis({ url, token }) : null;
+}
+
+const SWIPES_KEY = "coy:swipes"; // hash: profileId -> SwipeRecord
+const MATCHES_KEY = "coy:matches"; // hash: profileId -> matchedAt
+
+function redisStore(redis: Redis): Store {
+  return {
+    async read() {
+      const [swipes, matches] = await Promise.all([
+        redis.hgetall<Record<string, SwipeRecord>>(SWIPES_KEY),
+        redis.hgetall<Record<string, string>>(MATCHES_KEY),
+      ]);
+      return {
+        swipes: swipes ?? {},
+        matches: Object.entries(matches ?? {}).map(([profileId, matchedAt]) => ({ profileId, matchedAt })),
+      };
+    },
+    async addSwipe(profileId, record, match) {
+      // HSETNX is atomic: a second swipe on the same profile is rejected even across instances.
+      const created = await redis.hsetnx(SWIPES_KEY, profileId, record);
+      if (!created) return false;
+      if (match) await redis.hset(MATCHES_KEY, { [match.profileId]: match.matchedAt });
+      return true;
+    },
+    async reset() {
+      await redis.del(SWIPES_KEY, MATCHES_KEY);
+    },
+  };
+}
+
+// ----------------------------------------------------------------- File store
+
+function fileStore(filePath: string): Store {
+  const empty = (): Snapshot => ({ swipes: {}, matches: [] });
+
+  const read = async (): Promise<Snapshot> => {
+    try {
+      const parsed = JSON.parse(await fs.readFile(filePath, "utf8")) as Partial<Snapshot>;
+      return { swipes: parsed.swipes ?? {}, matches: parsed.matches ?? [] };
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return empty();
+      throw err;
+    }
+  };
+
+  const write = async (db: Snapshot) => {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    const tmp = `${filePath}.${process.pid}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify(db, null, 2), "utf8");
+    await fs.rename(tmp, filePath); // atomic replace
+  };
+
+  // Serialize read-modify-write cycles so concurrent swipes can't clobber each other.
+  let queue: Promise<unknown> = Promise.resolve();
+  const withLock = <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = queue.then(fn, fn);
+    queue = run.catch(() => undefined);
+    return run;
+  };
+
+  return {
+    read,
+    addSwipe: (profileId, record, match) =>
+      withLock(async () => {
+        const db = await read();
+        if (db.swipes[profileId]) return false;
+        db.swipes[profileId] = record;
+        if (match) db.matches.push(match);
+        await write(db);
+        return true;
+      }),
+    reset: () => withLock(() => write(empty())),
+  };
+}
+
+// ------------------------------------------------------------- Store choice
+
+let store: Store | null = null;
+function getStore(): Store {
+  if (store) return store;
+  const redis = redisFromEnv();
+  if (redis) {
+    store = redisStore(redis);
+  } else if (process.env.VERCEL) {
+    console.warn("[db] No Redis configured on Vercel; using /tmp (temporary, per-instance). Add Upstash Redis for persistence.");
+    store = fileStore(path.join(os.tmpdir(), "coy-db.json"));
+  } else {
+    store = fileStore(path.join(process.cwd(), "data", "db.json"));
+  }
+  return store;
+}
+
+// ------------------------------------------------------------------ Queries
 
 const profilesById = new Map(PROFILES.map((p) => [p.id, p]));
-
-async function readDb(): Promise<DbShape> {
-  try {
-    const raw = await fs.readFile(DB_PATH, "utf8");
-    const parsed = JSON.parse(raw) as Partial<DbShape>;
-    return { swipes: parsed.swipes ?? {}, matches: parsed.matches ?? [] };
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return emptyDb();
-    throw err;
-  }
-}
-
-async function writeDb(db: DbShape): Promise<void> {
-  await fs.mkdir(path.dirname(DB_PATH), { recursive: true });
-  const tmp = `${DB_PATH}.${process.pid}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(db, null, 2), "utf8");
-  await fs.rename(tmp, DB_PATH); // atomic replace
-}
-
-// Serialize all read-modify-write cycles so concurrent swipes can't clobber each other.
-let queue: Promise<unknown> = Promise.resolve();
-function withLock<T>(fn: () => Promise<T>): Promise<T> {
-  const run = queue.then(fn, fn);
-  queue = run.catch(() => undefined);
-  return run;
-}
 
 export function getProfile(id: string): Profile | undefined {
   return profilesById.get(id);
 }
 
 export async function getFeed(): Promise<Profile[]> {
-  const db = await readDb();
-  return PROFILES.filter((p) => !db.swipes[p.id]);
+  const { swipes } = await getStore().read();
+  return PROFILES.filter((p) => !swipes[p.id]);
 }
 
 export async function getMatches(): Promise<Match[]> {
-  const db = await readDb();
-  return db.matches
+  const { matches } = await getStore().read();
+  return matches
     .map((m) => {
       const profile = profilesById.get(m.profileId);
       return profile ? { profile, matchedAt: m.matchedAt } : null;
@@ -69,8 +155,8 @@ export async function getMatches(): Promise<Match[]> {
 // liked one-way, or liked-you-but-not-liked-back) this returns null, so the
 // caller can't distinguish those cases.
 export async function getMatch(profileId: string): Promise<Match | null> {
-  const db = await readDb();
-  const record = db.matches.find((m) => m.profileId === profileId);
+  const { matches } = await getStore().read();
+  const record = matches.find((m) => m.profileId === profileId);
   const profile = record && profilesById.get(record.profileId);
   return record && profile ? { profile, matchedAt: record.matchedAt } : null;
 }
@@ -84,10 +170,10 @@ export async function getProfileWithStatus(
 ): Promise<{ profile: Profile; status: ProfileStatus } | null> {
   const profile = profilesById.get(profileId);
   if (!profile) return null;
-  const db = await readDb();
-  const status: ProfileStatus = db.matches.some((m) => m.profileId === profileId)
+  const { swipes, matches } = await getStore().read();
+  const status: ProfileStatus = matches.some((m) => m.profileId === profileId)
     ? "matched"
-    : db.swipes[profileId]
+    : swipes[profileId]
       ? "swiped"
       : "unswiped";
   return { profile, status };
@@ -106,24 +192,20 @@ export async function recordSwipe(
   const profile = profilesById.get(profileId);
   if (!profile) throw new SwipeError(404, "Profile not found");
 
-  return withLock(async () => {
-    const db = await readDb();
-    if (db.swipes[profileId]) {
-      throw new SwipeError(409, "Already swiped on this profile");
-    }
+  const now = new Date().toISOString();
+  // A match requires BOTH sides to have liked. A pass never reveals anything.
+  const matched = action === "like" && INBOUND_LIKES.has(profileId);
 
-    const now = new Date().toISOString();
-    db.swipes[profileId] = { action, at: now };
+  const created = await getStore().addSwipe(
+    profileId,
+    { action, at: now },
+    matched ? { profileId, matchedAt: now } : null
+  );
+  if (!created) throw new SwipeError(409, "Already swiped on this profile");
 
-    // A match requires BOTH sides to have liked. A pass never reveals anything.
-    const matched = action === "like" && INBOUND_LIKES.has(profileId);
-    if (matched) db.matches.push({ profileId, matchedAt: now });
-
-    await writeDb(db);
-    return matched ? { matched, match: { profile, matchedAt: now } } : { matched };
-  });
+  return matched ? { matched, match: { profile, matchedAt: now } } : { matched };
 }
 
 export async function resetDb(): Promise<void> {
-  await withLock(() => writeDb(emptyDb()));
+  await getStore().reset();
 }

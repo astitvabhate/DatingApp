@@ -1,7 +1,7 @@
 # coy. — Swipe Discovery (Phase 1)
 
 Mobile-first, swipe-based discovery built with **Next.js 15 (App Router) + Tailwind CSS v4 + Framer Motion**.
-Backend is Next.js route handlers backed by a JSON file (`data/db.json`). Single implicit logged-in user.
+Backend is Next.js route handlers; data is stored in Upstash Redis in production and a JSON file (`data/db.json`) locally. Single implicit logged-in user.
 
 ## Run
 
@@ -16,7 +16,7 @@ Open `/discover`. On desktop, use the buttons or ← / → keys; on mobile, drag
 
 | Path | What |
 | --- | --- |
-| `app/page.tsx` | Home tab (blank placeholder) |
+| `app/page.tsx` | Redirects `/` to `/discover` (Home tab is a placeholder) |
 | `app/discover/page.tsx` | Swipe deck |
 | `app/discover/matches/page.tsx` | Mutual matches list |
 | `app/api/{feed,swipe,matches,reset}` | API route handlers |
@@ -50,3 +50,14 @@ Delete `data/db.json` (or tap "Reset demo data" in the empty state) to start ove
 ## Side-quest photos
 
 Match detail pages show placeholder photos from Lorem Picsum (picsum.photos), seeded per profile so they stay stable.
+
+## Deploying (Vercel)
+
+Vercel's filesystem is read-only, so swipes and matches are stored in **Upstash Redis** in production:
+
+1. Vercel dashboard → your project → **Storage** → **Create / Connect** → **Upstash for Redis** (free tier) → connect it to the project.
+   This adds `KV_REST_API_URL` and `KV_REST_API_TOKEN` (or `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`).
+2. Redeploy.
+
+Without Redis the app still works on Vercel but keeps swipes in `/tmp`, which is temporary and per-instance.
+Locally, data lives in `data/db.json` unless the Redis variables are set.
