@@ -166,7 +166,7 @@ export default function Discover() {
       if (!card) return finish();
       setShowHint(true);
       card.demo().then(finish);
-    }, 700);
+    }, 250); // just after the first card has sprung in
     // No cleanup here: a background feed refresh must not cancel the scheduled demo.
   }, [profiles, match, top]);
   useEffect(() => () => hintTeardown.current(), []); // only on leaving the page
