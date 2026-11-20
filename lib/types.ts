@@ -5,6 +5,7 @@ export type Profile = {
   id: string;
   name: string;
   age: number;
+  gender: "woman" | "man";
   photo: string;
   bio: string;
   location: string; // city or college

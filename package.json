@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "album": "node scripts/build-album.mjs",
+    "predev": "node scripts/build-album.mjs",
+    "prebuild": "node scripts/build-album.mjs",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
@@ -21,6 +24,7 @@
     "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "sharp": "^0.35.5",
     "tailwindcss": "^4.3.5",
     "typescript": "^5.9.3"
   }

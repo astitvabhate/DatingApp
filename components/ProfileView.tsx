@@ -87,7 +87,7 @@ export default function ProfileView({ profile, matchedLabel }: Props) {
       </motion.section>
 
       <motion.div variants={rise}>
-        <SideQuests profileId={profile.id} quests={profile.sideQuests} name={profile.name} />
+        <SideQuests profileId={profile.id} profilePhoto={profile.photo} quests={profile.sideQuests} name={profile.name} />
       </motion.div>
     </motion.div>
   );

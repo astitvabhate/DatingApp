@@ -20,7 +20,7 @@ Open `/discover`. On desktop, use the buttons or ← / → keys; on mobile, drag
 | `app/discover/page.tsx` | Swipe deck |
 | `app/discover/matches/page.tsx` | Mutual matches list |
 | `app/api/{feed,swipe,matches,reset}` | API route handlers |
-| `lib/seed.ts` | 32 seed profiles + server-only `INBOUND_LIKES` |
+| `lib/seed.ts` | 16 seed profiles + server-only `INBOUND_LIKES` |
 | `lib/db.ts` | JSON-file persistence (atomic writes, serialized updates) |
 | `components/` | `SwipeCard`, `Discover`, `MatchModal`, `MatchesList`, `TabBar` |
 
@@ -43,13 +43,14 @@ always returns `{ matched: false }`. A like on someone reveals their like only w
 ## Demo tip
 
 These profiles have already liked you, so liking them triggers "It's a match!":
-Aisha, Kabir, Priya, Isha, Tara, Siddharth, Kavya, Pooja, Anika, Omar.
+Aisha, Priya, Isha, Tara, Kavya, Pooja, Anika.
 
 Delete `data/db.json` (or tap "Reset demo data" in the empty state) to start over.
 
-## Side-quest photos
+## Photos
 
-Match detail pages show placeholder photos from Lorem Picsum (picsum.photos), seeded per profile so they stay stable.
+Profile and side-quest photos come from `public/images/album/women/`. Name a file after a profile id (e.g. `p01.jpg`) to assign it; other files fill the remaining profiles in filename order.
+`npm run album` (also run automatically before dev/build) writes small WebP copies to `public/images/album-web/`.
 
 ## Deploying (Vercel)
 
