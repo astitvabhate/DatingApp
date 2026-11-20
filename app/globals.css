@@ -1,0 +1,47 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-bricolage), ui-sans-serif, system-ui, sans-serif;
+}
+
+@theme {
+  --color-ink: #151515;
+  --color-brand: #ff3f7f;
+  --color-brand-dark: #e8306c;
+  --color-lilac: #e8e4ff;
+  --color-lilac-dot: #c9c1f2;
+  --color-peach: #ffe2cf;
+  --color-blush: #ffe1ec;
+  --color-paper: #f7f5ff;
+}
+
+/* Signature look: solid ink outline + hard offset shadow */
+@utility chunky {
+  border: 2px solid var(--color-ink);
+  box-shadow: 4px 4px 0 0 var(--color-ink);
+}
+@utility chunky-sm {
+  border: 2px solid var(--color-ink);
+  box-shadow: 3px 3px 0 0 var(--color-ink);
+}
+@utility chunky-lg {
+  border: 2px solid var(--color-ink);
+  box-shadow: 6px 6px 0 0 var(--color-ink);
+}
+/* Pressable: sinks into its shadow on tap */
+@utility press {
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+  &:active {
+    transform: translate(3px, 3px);
+    box-shadow: 1px 1px 0 0 var(--color-ink);
+  }
+}
+
+html,
+body {
+  height: 100%;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}

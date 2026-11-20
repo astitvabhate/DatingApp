@@ -1,0 +1,13 @@
+node_modules
+.next
+out
+next-env.d.ts
+*.tsbuildinfo
+# runtime database (recreated from seed on first request)
+data/db.json
+data/*.tmp
+.env*.local
+
+# local editor/assistant config
+.claude/
+CLAUDE.md
