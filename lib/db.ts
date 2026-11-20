@@ -1,21 +1,24 @@
 import "server-only";
 import { promises as fs } from "fs";
-import os from "os";
 import path from "path";
 import { Redis } from "@upstash/redis";
 import { createClient } from "redis";
+import { cookies } from "next/headers";
 import { INBOUND_LIKES, PROFILES } from "./seed";
 import type { Match, Profile, SwipeAction } from "./types";
 
-// Persistence for swipes and matches, with two interchangeable backends:
+// Persistence for swipes and matches, with interchangeable backends:
 //
 // - Redis: required for real persistence on serverless hosts like Vercel, where
 //   every route runs as a separate function with its own temporary disk.
 //   Supports Upstash's REST API (KV_REST_API_* / UPSTASH_REDIS_REST_*) and any
 //   standard Redis connection string (REDIS_URL / KV_URL).
-// - JSON file: local development (data/db.json). On Vercel without Redis it
-//   falls back to /tmp so swipes don't error, but that data is per-instance
-//   and temporary.
+// - Cookie: the default on Vercel when no Redis is configured. The user's own
+//   swipes live in an httpOnly cookie that every route receives, so all of
+//   Vercel's separate functions see the same state with zero setup. Matches
+//   are derived on the server from INBOUND_LIKES, never stored in the cookie,
+//   so editing the cookie can't fake a match or reveal who liked the user.
+// - JSON file: local development (data/db.json).
 //
 // Profiles themselves are static seed data (lib/seed.ts).
 
@@ -113,6 +116,69 @@ function tcpRedisStore(url: string): Store {
   };
 }
 
+// --------------------------------------------------------------- Cookie store
+
+const COOKIE = "coy_swipes";
+const COOKIE_MAX_AGE = 60 * 60 * 24 * 365; // 1 year
+// Compact cookie payload: { [profileId]: ["l" | "p", unixSeconds] }
+type CookiePayload = Record<string, ["l" | "p", number]>;
+
+async function readCookieSwipes(): Promise<Record<string, SwipeRecord>> {
+  const raw = (await cookies()).get(COOKIE)?.value;
+  if (!raw) return {};
+  try {
+    const data = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as CookiePayload;
+    const out: Record<string, SwipeRecord> = {};
+    for (const [id, entry] of Object.entries(data)) {
+      // Only accept well-formed entries for real profiles.
+      if (!profilesById.has(id) || !Array.isArray(entry)) continue;
+      const [a, t] = entry;
+      if ((a !== "l" && a !== "p") || typeof t !== "number") continue;
+      out[id] = { action: a === "l" ? "like" : "pass", at: new Date(t * 1000).toISOString() };
+    }
+    return out;
+  } catch {
+    return {}; // corrupted cookie: start fresh
+  }
+}
+
+async function writeCookieSwipes(swipes: Record<string, SwipeRecord>) {
+  const payload: CookiePayload = {};
+  for (const [id, r] of Object.entries(swipes)) {
+    payload[id] = [r.action === "like" ? "l" : "p", Math.floor(new Date(r.at).getTime() / 1000)];
+  }
+  (await cookies()).set(COOKIE, Buffer.from(JSON.stringify(payload)).toString("base64url"), {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: COOKIE_MAX_AGE,
+  });
+}
+
+function cookieStore(): Store {
+  return {
+    async read() {
+      const swipes = await readCookieSwipes();
+      // Matches are derived server-side: a like on someone in INBOUND_LIKES.
+      const matches = Object.entries(swipes)
+        .filter(([id, r]) => r.action === "like" && INBOUND_LIKES.has(id))
+        .map(([profileId, r]) => ({ profileId, matchedAt: r.at }));
+      return { swipes, matches };
+    },
+    async addSwipe(profileId, record) {
+      const swipes = await readCookieSwipes();
+      if (swipes[profileId]) return false;
+      swipes[profileId] = record;
+      await writeCookieSwipes(swipes);
+      return true;
+    },
+    async reset() {
+      (await cookies()).delete(COOKIE);
+    },
+  };
+}
+
 // ----------------------------------------------------------------- File store
 
 function fileStore(filePath: string): Store {
@@ -160,7 +226,7 @@ function fileStore(filePath: string): Store {
 
 // ------------------------------------------------------------- Store choice
 
-export type StorageBackend = "upstash" | "redis" | "tmp-file" | "local-file";
+export type StorageBackend = "upstash" | "redis" | "cookie" | "local-file";
 
 let store: Store | null = null;
 let backend: StorageBackend = "local-file";
@@ -175,10 +241,9 @@ function getStore(): Store {
   } else if (redisUrl) {
     store = tcpRedisStore(redisUrl);
     backend = "redis";
-  } else if (process.env.VERCEL) {
-    console.warn("[db] No Redis configured on Vercel; using /tmp. Data is NOT shared between routes — matches pages will 404. Connect Redis.");
-    store = fileStore(path.join(os.tmpdir(), "coy-db.json"));
-    backend = "tmp-file";
+  } else if (process.env.VERCEL || process.env.STORAGE === "cookie") {
+    store = cookieStore();
+    backend = "cookie";
   } else {
     store = fileStore(path.join(process.cwd(), "data", "db.json"));
     backend = "local-file";
@@ -189,7 +254,7 @@ function getStore(): Store {
 /** Which storage this deployment uses, and whether it's reachable (no secrets). */
 export async function storageStatus(): Promise<{ backend: StorageBackend; persistent: boolean; ok: boolean; error?: string }> {
   const s = getStore();
-  const persistent = backend === "upstash" || backend === "redis" || backend === "local-file";
+  const persistent = true; // cookie storage persists per browser
   try {
     await s.read();
     return { backend, persistent, ok: true };

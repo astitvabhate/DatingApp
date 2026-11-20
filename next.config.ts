@@ -1,6 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Lets a test build live alongside a running `next dev` (which uses .next).
+  distDir: process.env.NEXT_DIST_DIR || ".next",
   // Expose the spec'd endpoints (GET /feed, POST /swipe, GET /matches)
   // on top of the App Router handlers that live under /api/*.
   async rewrites() {

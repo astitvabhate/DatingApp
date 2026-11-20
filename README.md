@@ -1,7 +1,7 @@
 # coy. — Swipe Discovery (Phase 1)
 
 Mobile-first, swipe-based discovery built with **Next.js 15 (App Router) + Tailwind CSS v4 + Framer Motion**.
-Backend is Next.js route handlers; data is stored in Upstash Redis in production and a JSON file (`data/db.json`) locally. Single implicit logged-in user.
+Backend is Next.js route handlers; swipes are stored in a JSON file locally (`data/db.json`), a per-visitor cookie on Vercel, or Redis if configured. Single implicit logged-in user.
 
 ## Run
 
@@ -55,12 +55,9 @@ Profile and side-quest photos come from `public/images/album/women/`. Name a fil
 
 ## Deploying (Vercel)
 
-On Vercel every route runs as a separate function with its own temporary disk, so a **Redis database is required**; without it, matches made on one route are invisible to others (e.g. match pages show "Match not found").
+Works out of the box. On Vercel each route runs as a separate function with its own temporary disk, so with no database configured the app stores **each visitor's own swipes in an httpOnly cookie** (sent to every route, persists across reloads, 1 year). Matches are still computed on the server from `INBOUND_LIKES`, so the cookie can't fake a match or reveal who liked you.
 
-1. Vercel dashboard → project → **Storage** → connect **Upstash for Redis** *or* **Redis** (free tiers work).
-   Either sets the variables the app reads: `KV_REST_API_URL`/`KV_REST_API_TOKEN`, `UPSTASH_REDIS_REST_URL`/`_TOKEN`, or `REDIS_URL`.
-2. Make sure the database is connected to the **Production** environment, then **redeploy**.
-3. Open `/api/health` on your site: it should say `"backend":"upstash"` or `"redis"` with `"ok":true`.
-   `"tmp-file"` means no database is connected.
+Optional: connect **Upstash for Redis** or **Redis** (Vercel → Storage) to store swipes in a database instead. The app reads `KV_REST_API_URL`/`KV_REST_API_TOKEN`, `UPSTASH_REDIS_REST_URL`/`_TOKEN`, or `REDIS_URL`; redeploy after connecting.
 
-Locally, data lives in `data/db.json` unless Redis variables are set.
+`GET /api/health` shows the active backend: `cookie`, `upstash`, `redis` or `local-file`.
+Locally, data lives in `data/db.json` (set `STORAGE=cookie` to try cookie mode).

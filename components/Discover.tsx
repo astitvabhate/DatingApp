@@ -33,6 +33,9 @@ export default function Discover() {
   // Bumped when a failed swipe puts a card back, so it remounts fresh instead of
   // reviving the half-exited instance (which is stuck off-screen in "leaving" state).
   const [retry, setRetry] = useState<Record<string, number>>({});
+  // Swipes are sent one at a time, in order. With cookie storage each response
+  // rewrites the whole swipe list, so overlapping requests could drop a swipe.
+  const swipeQueue = useRef<Promise<unknown>>(Promise.resolve());
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const showToast = useCallback((kind: Toast["kind"], text: string) => {
@@ -88,11 +91,15 @@ export default function Discover() {
       showToast(action, action === "like" ? `Liked ${profile.name}` : `Passed on ${profile.name}`);
 
       try {
-        const res = await fetch("/api/swipe", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ profileId: profile.id, action }),
-        });
+        const send = () =>
+          fetch("/api/swipe", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ profileId: profile.id, action }),
+          });
+        const request = swipeQueue.current.then(send, send);
+        swipeQueue.current = request.catch(() => undefined);
+        const res = await request;
         if (res.status === 409) return; // already recorded server-side
         if (!res.ok) throw new Error(`swipe failed: ${res.status}`);
         const data = (await res.json()) as SwipeResponse;
