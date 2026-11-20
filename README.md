@@ -33,6 +33,7 @@ Open `/discover`. On desktop, use the buttons or ← / → keys; on mobile, drag
   `400` invalid body, `404` unknown profile, `409` already swiped.
 - `GET /matches` → `{ matches: { profile, matchedAt }[] }` newest first.
 - `POST /api/reset` — demo helper; clears swipes and matches.
+- `GET /api/health` — which storage backend is active (no secrets).
 
 ## Privacy guarantee
 
@@ -54,11 +55,12 @@ Profile and side-quest photos come from `public/images/album/women/`. Name a fil
 
 ## Deploying (Vercel)
 
-Vercel's filesystem is read-only, so swipes and matches are stored in **Upstash Redis** in production:
+On Vercel every route runs as a separate function with its own temporary disk, so a **Redis database is required**; without it, matches made on one route are invisible to others (e.g. match pages show "Match not found").
 
-1. Vercel dashboard → your project → **Storage** → **Create / Connect** → **Upstash for Redis** (free tier) → connect it to the project.
-   This adds `KV_REST_API_URL` and `KV_REST_API_TOKEN` (or `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`).
-2. Redeploy.
+1. Vercel dashboard → project → **Storage** → connect **Upstash for Redis** *or* **Redis** (free tiers work).
+   Either sets the variables the app reads: `KV_REST_API_URL`/`KV_REST_API_TOKEN`, `UPSTASH_REDIS_REST_URL`/`_TOKEN`, or `REDIS_URL`.
+2. Make sure the database is connected to the **Production** environment, then **redeploy**.
+3. Open `/api/health` on your site: it should say `"backend":"upstash"` or `"redis"` with `"ok":true`.
+   `"tmp-file"` means no database is connected.
 
-Without Redis the app still works on Vercel but keeps swipes in `/tmp`, which is temporary and per-instance.
-Locally, data lives in `data/db.json` unless the Redis variables are set.
+Locally, data lives in `data/db.json` unless Redis variables are set.

@@ -3,14 +3,16 @@ import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
 import { Redis } from "@upstash/redis";
+import { createClient } from "redis";
 import { INBOUND_LIKES, PROFILES } from "./seed";
 import type { Match, Profile, SwipeAction } from "./types";
 
 // Persistence for swipes and matches, with two interchangeable backends:
 //
-// - Redis (Upstash): used whenever its REST credentials are set. Required for
-//   real persistence on serverless hosts like Vercel, whose filesystem is
-//   read-only and not shared between instances.
+// - Redis: required for real persistence on serverless hosts like Vercel, where
+//   every route runs as a separate function with its own temporary disk.
+//   Supports Upstash's REST API (KV_REST_API_* / UPSTASH_REDIS_REST_*) and any
+//   standard Redis connection string (REDIS_URL / KV_URL).
 // - JSON file: local development (data/db.json). On Vercel without Redis it
 //   falls back to /tmp so swipes don't error, but that data is per-instance
 //   and temporary.
@@ -76,6 +78,41 @@ function redisStore(redis: Redis): Store {
   };
 }
 
+type TcpClient = ReturnType<typeof createClient>;
+let tcpClient: Promise<TcpClient> | null = null;
+function tcp(url: string): Promise<TcpClient> {
+  // One connection per warm function instance.
+  tcpClient ??= createClient({ url })
+    .on("error", (err) => console.error("[db] redis error", err))
+    .connect() as Promise<TcpClient>;
+  return tcpClient;
+}
+
+function tcpRedisStore(url: string): Store {
+  return {
+    async read() {
+      const c = await tcp(url);
+      const [swipes, matches] = await Promise.all([c.hGetAll(SWIPES_KEY), c.hGetAll(MATCHES_KEY)]);
+      return {
+        swipes: Object.fromEntries(Object.entries(swipes).map(([id, v]) => [id, JSON.parse(v) as SwipeRecord])),
+        matches: Object.entries(matches).map(([profileId, matchedAt]) => ({ profileId, matchedAt })),
+      };
+    },
+    async addSwipe(profileId, record, match) {
+      const c = await tcp(url);
+      const created = await c.eval(ADD_SWIPE_SCRIPT, {
+        keys: [SWIPES_KEY, MATCHES_KEY],
+        arguments: [profileId, JSON.stringify(record), match?.matchedAt ?? ""],
+      });
+      return Number(created) === 1;
+    },
+    async reset() {
+      const c = await tcp(url);
+      await c.del([SWIPES_KEY, MATCHES_KEY]);
+    },
+  };
+}
+
 // ----------------------------------------------------------------- File store
 
 function fileStore(filePath: string): Store {
@@ -123,19 +160,42 @@ function fileStore(filePath: string): Store {
 
 // ------------------------------------------------------------- Store choice
 
+export type StorageBackend = "upstash" | "redis" | "tmp-file" | "local-file";
+
 let store: Store | null = null;
+let backend: StorageBackend = "local-file";
+
 function getStore(): Store {
   if (store) return store;
-  const redis = redisFromEnv();
-  if (redis) {
-    store = redisStore(redis);
+  const upstash = redisFromEnv();
+  const redisUrl = process.env.REDIS_URL ?? process.env.KV_URL;
+  if (upstash) {
+    store = redisStore(upstash);
+    backend = "upstash";
+  } else if (redisUrl) {
+    store = tcpRedisStore(redisUrl);
+    backend = "redis";
   } else if (process.env.VERCEL) {
-    console.warn("[db] No Redis configured on Vercel; using /tmp (temporary, per-instance). Add Upstash Redis for persistence.");
+    console.warn("[db] No Redis configured on Vercel; using /tmp. Data is NOT shared between routes — matches pages will 404. Connect Redis.");
     store = fileStore(path.join(os.tmpdir(), "coy-db.json"));
+    backend = "tmp-file";
   } else {
     store = fileStore(path.join(process.cwd(), "data", "db.json"));
+    backend = "local-file";
   }
   return store;
+}
+
+/** Which storage this deployment uses, and whether it's reachable (no secrets). */
+export async function storageStatus(): Promise<{ backend: StorageBackend; persistent: boolean; ok: boolean; error?: string }> {
+  const s = getStore();
+  const persistent = backend === "upstash" || backend === "redis" || backend === "local-file";
+  try {
+    await s.read();
+    return { backend, persistent, ok: true };
+  } catch (err) {
+    return { backend, persistent, ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 // ------------------------------------------------------------------ Queries
